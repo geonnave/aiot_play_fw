@@ -64,7 +64,9 @@ int main(void) {
     // bsp
     board_init();
 
+    gpio_P005_output_init();
     gpio_P020_output_init();
+    gpio_P011_output_init();
     gpio_P020_output_high();
     // ntw
     ntw_init(
@@ -231,7 +233,7 @@ void _ntw_receive_cb(uint8_t* buf, uint8_t bufLen){
         app_vars.asn_trigger_music[3] = *(buf+4);
         app_vars.asn_trigger_music[4] = *(buf+5);
         printf("msg received asn[4] %d\n",*(buf+5));
-        dn_ipmt_cancelTx(); //ADDED hotfix, try to fix a bug where at a random moment dn_ipmt_vars.busyTx in true prevents call of _ntw_getTime_cb
+        //dn_ipmt_cancelTx(); //ADDED hotfix, try to fix a bug where at a random moment dn_ipmt_vars.busyTx in true prevents call of _ntw_getTime_cb
                             // bug is still there but it seems like its less present, if a musician doesnt trigger it does at the next command.
                             //TODO fix bug ? add lock mechanism to remove that arbitrary command? why does it affect motes in different ways, some bugging more  freuently than others? music partition length difference for each mote?
                             // add message acknowledgment from mote to prevent that issue?

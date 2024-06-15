@@ -9,6 +9,7 @@ C library to connect to a SmartMesh IP Mote.
 #include "dn_ipmt.h"
 #include "dn_lock.h"
 #include "dn_serial_mt.h"
+#include "gpio.h"
 
 //=========================== variables =======================================
 
@@ -1991,6 +1992,8 @@ dn_err_t dn_ipmt_getParameter_time(dn_ipmt_getParameter_time_rpt* reply) {
    if (rc==DN_ERR_NONE) {
       // I'm now busy transmitting
       dn_ipmt_vars.busyTx         = TRUE;
+      gpio_P005_output_low();
+      gpio_P011_output_low();
    }
    
    // unlock the module
@@ -2004,6 +2007,7 @@ void dn_ipmt_getParameter_time_reply(uint8_t cmdId, uint8_t rc, uint8_t* payload
    dn_ipmt_getParameter_time_rpt* reply;
    uint8_t paramId;
    
+   gpio_P005_output_high();
    // verify I'm expecting this answer
    if (dn_ipmt_vars.busyTx==FALSE || dn_ipmt_vars.cmdId!=cmdId) {
       return;
@@ -2041,6 +2045,7 @@ void dn_ipmt_getParameter_time_reply(uint8_t cmdId, uint8_t rc, uint8_t* payload
    
    // I'm not busy transmitting anymore
    dn_ipmt_vars.busyTx=FALSE;
+   gpio_P011_output_high();
 }
 
 //===== getParameter_charge
