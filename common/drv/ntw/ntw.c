@@ -34,6 +34,8 @@ typedef struct {
     ntw_getMoteId_cbt   ntw_getMoteId_cb;
     ntw_getTime_cbt     ntw_getTime_cb;
     ntw_receive_cbt     ntw_receive_cb;
+    ntw_joining_cbt     ntw_joining_cb;
+
     // ipmt
     bool                isOper;                            // true iff is operational
     uint8_t             socketId;                          // ID of the mote's UDP socket
@@ -107,7 +109,11 @@ void     hfclock_start(void);
 
 //=========================== public ==========================================
 
-void ntw_init(ntw_getMoteId_cbt ntw_getMoteId_cb, ntw_getTime_cbt ntw_getTime_cb, ntw_receive_cbt ntw_receive_cb) {
+void ntw_init(
+              ntw_joining_cbt   ntw_joining_cb,
+              ntw_getMoteId_cbt ntw_getMoteId_cb,
+              ntw_getTime_cbt ntw_getTime_cb, 
+              ntw_receive_cbt ntw_receive_cb) {
 
     // reset variables
     memset(&ntw_vars,0x00,sizeof(ntw_vars_t));
@@ -115,6 +121,8 @@ void ntw_init(ntw_getMoteId_cbt ntw_getMoteId_cb, ntw_getTime_cbt ntw_getTime_cb
     memset(&ntw_dbg, 0x00,sizeof(ntw_dbg_t));
 
     // store params
+
+    ntw_vars.ntw_joining_cb       = ntw_joining_cb;
     ntw_vars.ntw_getMoteId_cb     = ntw_getMoteId_cb;
     ntw_vars.ntw_getTime_cb       = ntw_getTime_cb;
     ntw_vars.ntw_receive_cb       = ntw_receive_cb;
@@ -424,6 +432,9 @@ void api_join_reply(void) {
    // cancel timeout
    fsm_cancelEvent();
    
+   // let application know
+   ntw_vars.ntw_joining_cb();
+
    // choose next step
    // no next step at this point. FSM will advance when we received a "joined"
    // notification

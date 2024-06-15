@@ -100,7 +100,7 @@ void pwm_init(void) {
 void pwm_setperiod(uint16_t period) {
     
     // stop
-    pwm_stop();
+    //pwm_stop(); // 1/2 line to comment to workaround bug where txbusy remains in true, preventing next music plays.
 
     // set
     NRF_PWM0->COUNTERTOP          = period & 0x7fff; // COUNTERTOP is a 24-bit register
@@ -112,7 +112,7 @@ void pwm_setperiod(uint16_t period) {
     // start
     NRF_PWM0->EVENTS_SEQSTARTED[0]=0;
     NRF_PWM0->TASKS_SEQSTART[0]   = 0x00000001;
-    while(NRF_PWM0->EVENTS_SEQSTARTED[0]==0);
+    //while(NRF_PWM0->EVENTS_SEQSTARTED[0]==0); // 2/2 line to comment to workaround bug where txbusy remains in true, preventing next music plays.
 }
 
 void pwm_stop(void) {

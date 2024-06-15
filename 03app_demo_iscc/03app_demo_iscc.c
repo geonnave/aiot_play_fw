@@ -7,6 +7,7 @@
 #include "music.h"
 #include "gpio.h"
 #include "dn_ipmt.h"
+#include "../drv/leds/leds.h"
 
 //=========================== defines =========================================
 
@@ -24,6 +25,9 @@ typedef enum {
 #define PLAY_MODE_STARWARS     1
 #define PLAY_MODE_HARRY_POTTER 2
 
+//#define ROLLOVER_MODE
+#define CMD_MOTE_MODE
+
 //=========================== variables =======================================
 
 typedef struct {
@@ -37,6 +41,7 @@ typedef struct {
 app_vars_t app_vars;
 
 typedef struct {
+    uint32_t       numcalls_ntw_joining_cb;
     uint32_t       numcalls_ntw_getMoteId_cb;
     uint32_t       numcalls_ntw_getTime_cb;
     uint32_t       numcalls_ntw_receive_cb;
@@ -49,6 +54,7 @@ app_dbg_t app_dbg;
 
 //=========================== prototypes ======================================
 
+void _ntw_joining_cb(void);
 void _ntw_getMoteId_cb(dn_ipmt_getParameter_moteId_rpt* reply);
 void _ntw_getTime_cb(dn_ipmt_getParameter_time_rpt* reply);
 void _ntw_receive_cb(uint8_t* buf, uint8_t bufLen);
@@ -64,12 +70,14 @@ int main(void) {
     // bsp
     board_init();
 
-    gpio_P005_output_init();
+    leds_init();
+    leds_white_on();
+
     gpio_P020_output_init();
-    gpio_P011_output_init();
     gpio_P020_output_high();
     // ntw
     ntw_init(
+        _ntw_joining_cb,     // ntw_joining_cb
         _ntw_getMoteId_cb,   // ntw_getMoteId_cb
         _ntw_getTime_cb,     // ntw_getTime_cb
         _ntw_receive_cb      // ntw_receive_cb
@@ -114,11 +122,26 @@ int main(void) {
 
 //=========================== private =========================================
 
+void _ntw_joining_cb(void) {
+    
+    // debug
+    app_dbg.numcalls_ntw_joining_cb++;
+
+    // white led: no connection to mote yet
+    leds_white_off();
+
+    // blue led: joining
+    leds_blue_on();
+}
+
+
 void _ntw_getMoteId_cb(dn_ipmt_getParameter_moteId_rpt* reply) {
 
     // debug
     app_dbg.numcalls_ntw_getMoteId_cb++;
 
+    leds_white_off();
+    leds_blue_off();
     do {
         if (reply->RC!=DN_ERR_NONE) {
             app_dbg.num_rc_error++;
@@ -151,6 +174,35 @@ void _ntw_getTime_cb(dn_ipmt_getParameter_time_rpt* reply) {
         // copy over to local copy for easier debug
         memcpy(app_vars.asn,reply->asn,sizeof(app_vars.asn));
 
+#ifdef ROLLOVER_MODE
+        switch (app_vars.step) {
+            case STEP_1_WAITING_ASN3:
+                app_dbg.num_STEP_1_WAITING_ASN3++;
+                if ( (app_vars.asn[3]&0x3f)==0) {
+                    // step 2: I'm at the right ASN[3]
+                    // wait for ASN[4] to roll over
+
+                    num_asns_to_wait  = 0xff-app_vars.asn[4];
+                    num_ticks_to_wait = num_asns_to_wait*TICKS_PER_SLOT;
+                    app_vars.step     = STEP_2_WAITING_ASN4_ROLLOVER;
+                    NRF_RTC0->CC[0]   = num_ticks_to_wait;
+                }
+                break;
+            case STEP_2_WAITING_ASN4_ROLLOVER:
+                app_dbg.num_STEP_2_WAITING_ASN4_ROLLOVER++;
+                app_vars.step         = STEP_1_WAITING_ASN3;
+                NRF_RTC0->CC[0]       = ASN1_POLLING_PERIOD;
+                trackIdx              = app_vars.moteId-2; // the first mote has moteId 2, yet we want trackIdx 0 for it
+                if ((app_vars.asn[3]&0x40)==0) {
+                    music_play(SONGTITLE_STAR_WARS,trackIdx);
+                } else {
+                    music_play(SONGTITLE_HARRY_POTTER,trackIdx);
+                }
+                break;
+        }
+#endif
+
+#ifdef CMD_MOTE_MODE
         switch (app_vars.step) {
             case STEP_1_WAITING_ASN3:
                 app_dbg.num_STEP_1_WAITING_ASN3++;
@@ -166,31 +218,13 @@ void _ntw_getTime_cb(dn_ipmt_getParameter_time_rpt* reply) {
                                             + (app_vars.asn_trigger_music[3]<<8) 
                                             + (app_vars.asn_trigger_music[4]<<0);
 
-                //uint64_t current_asn =   (app_vars.asn[0]<<32) 
-                //                       + (app_vars.asn[1]<<24) 
-                //                       + (app_vars.asn[2]<<16) 
-                //                       + (app_vars.asn[3]<<8) 
-                //                       + (app_vars.asn[4]<<0);
-                //uint64_t asn_trigger_music =  (app_vars.asn_trigger_music[0]<<32) 
-                //                            + (app_vars.asn_trigger_music[1]<<24) 
-                //                            + (app_vars.asn_trigger_music[2]<<16) 
-                //                            + (app_vars.asn_trigger_music[3]<<8) 
-                //                            + (app_vars.asn_trigger_music[4]<<0);
+
                 if ( (asn_trigger_music - current_asn) < ASN1_POLLING_PERIOD/TICKS_PER_SLOT) {
                     num_asns_to_wait  = asn_trigger_music - current_asn;
                     num_ticks_to_wait = num_asns_to_wait*TICKS_PER_SLOT;
                     app_vars.step     = STEP_2_WAITING_ASN4_ROLLOVER;
                     NRF_RTC0->CC[0]   = num_ticks_to_wait;
                 }
-                //if ( (app_vars.asn[3]&0x3f)==0) {
-                //    // step 2: I'm at the right ASN[3]
-                //    // wait for ASN[4] to roll over
-
-                //    num_asns_to_wait  = 0xff-app_vars.asn[4];
-                //    num_ticks_to_wait = num_asns_to_wait*TICKS_PER_SLOT;
-                //    app_vars.step     = STEP_2_WAITING_ASN4_ROLLOVER;
-                //    NRF_RTC0->CC[0]   = num_ticks_to_wait;
-                //}
                 break;
             case STEP_2_WAITING_ASN4_ROLLOVER:
                 app_dbg.num_STEP_2_WAITING_ASN4_ROLLOVER++;
@@ -209,14 +243,9 @@ void _ntw_getTime_cb(dn_ipmt_getParameter_time_rpt* reply) {
 
                 }
                 app_vars.music_play_mode = PLAY_MODE_STOP;
-
-                //if ((app_vars.asn[3]&0x40)==0) {
-                //    music_play(SONGTITLE_STAR_WARS,trackIdx);
-                //} else {
-                //    music_play(SONGTITLE_HARRY_POTTER,trackIdx);
-                //}
                 break;
         }
+#endif
 
     } while(0);
 }
