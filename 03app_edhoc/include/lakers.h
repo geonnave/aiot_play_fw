@@ -14,6 +14,24 @@
 #include "lakers_shared.h"
 #include "lakers_ead_authz.h"
 
+typedef struct CredentialC {
+  BufferCred bytes;
+  CredentialKey key;
+  /**
+   * differs from Rust: here we assume the kid is always present
+   * this is to simplify the C API, since C doesn't support Option<T>
+   * the alternative would be to use a pointer, but then we need to care about memory management
+   */
+  BufferKid kid;
+  CredentialType cred_type;
+} CredentialC;
+
+typedef struct EadAuthzDevice {
+  ZeroTouchDevice start;
+  ZeroTouchDeviceWaitEAD2 wait_ead2;
+  ZeroTouchDeviceDone done;
+} EadAuthzDevice;
+
 /**
  * Note that while the Rust version supports optional value to indicate an empty value,
  * in the C version we use an empty buffer for that case.
@@ -24,17 +42,6 @@ typedef struct EADItemC {
   EdhocMessageBuffer value;
 } EADItemC;
 
-/**
- * structs compatible with the C FFI
- */
-typedef struct EdhocInitiatorC {
-  InitiatorStart state;
-} EdhocInitiatorC;
-
-typedef struct EdhocInitiatorWaitM2C {
-  WaitM2 state;
-} EdhocInitiatorWaitM2C;
-
 typedef struct ProcessingM2C {
   BytesMac2 mac_2;
   BytesHashLen prk_2e;
@@ -43,74 +50,80 @@ typedef struct ProcessingM2C {
   BytesP256ElemLen g_y;
   EdhocMessageBuffer plaintext_2;
   uint8_t c_r;
+  IdCred id_cred_r;
   struct EADItemC *ead_2;
 } ProcessingM2C;
 
-typedef struct EdhocInitiatorProcessingM2C {
-  struct ProcessingM2C state;
-} EdhocInitiatorProcessingM2C;
+/**
+ * structs compatible with the C FFI
+ */
+typedef struct EdhocInitiator {
+  InitiatorStart start;
+  WaitM2 wait_m2;
+  struct ProcessingM2C processing_m2;
+  ProcessedM2 processed_m2;
+  struct CredentialC *cred_i;
+  Completed completed;
+} EdhocInitiator;
 
-typedef struct EdhocInitiatorProcessedM2C {
-  ProcessedM2 state;
-  CredentialRPK cred_i;
-} EdhocInitiatorProcessedM2C;
+#ifdef __cplusplus
+extern "C" {
+#endif // __cplusplus
 
-typedef struct EdhocInitiatorDoneC {
-  Completed state;
-} EdhocInitiatorDoneC;
+int8_t credential_new(struct CredentialC *cred, const uint8_t *value, uintptr_t value_len);
 
-int8_t credential_rpk_new(const uint8_t *value, uintptr_t value_len, CredentialRPK *cred);
+int8_t credential_check_or_fetch(struct CredentialC *cred_expected,
+                                 IdCred *id_cred_received,
+                                 struct CredentialC *cred_out);
 
 void p256_generate_key_pair_from_c(uint8_t *out_private_key, uint8_t *out_public_key);
 
-ZeroTouchDevice authz_device_new(const uint8_t *id_u,
-                                 uintptr_t id_u_len,
-                                 const BytesP256ElemLen *g_w,
-                                 const uint8_t *loc_w,
-                                 uintptr_t loc_w_len);
+int8_t authz_device_new(struct EadAuthzDevice *device_c,
+                        const uint8_t *id_u,
+                        uintptr_t id_u_len,
+                        const BytesP256ElemLen *g_w,
+                        const uint8_t *loc_w,
+                        uintptr_t loc_w_len);
 
-int8_t authz_device_prepare_ead_1(const ZeroTouchDevice *device_c,
+int8_t authz_device_prepare_ead_1(struct EadAuthzDevice *device_c,
                                   const BytesP256ElemLen *secret,
                                   uint8_t ss,
-                                  ZeroTouchDeviceWaitEAD2 *device_c_out,
                                   struct EADItemC *ead_1_c_out);
 
-int8_t authz_device_process_ead_2(ZeroTouchDeviceWaitEAD2 *device,
+int8_t authz_device_process_ead_2(struct EadAuthzDevice *device_c,
                                   struct EADItemC *ead_2_c,
-                                  CredentialRPK cred_v,
-                                  ZeroTouchDeviceDone *device_c_out);
+                                  struct CredentialC *cred_v);
 
-struct EdhocInitiatorC initiator_new(void);
+int8_t initiator_new(struct EdhocInitiator *initiator);
 
-int8_t initiator_prepare_message_1(struct EdhocInitiatorC *initiator_c,
+int8_t initiator_prepare_message_1(struct EdhocInitiator *initiator_c,
                                    uint8_t *c_i,
                                    struct EADItemC *ead_1_c,
-                                   struct EdhocInitiatorWaitM2C *initiator_c_out,
                                    EdhocMessageBuffer *message_1);
 
-int8_t initiator_parse_message_2(struct EdhocInitiatorWaitM2C *initiator_c,
+int8_t initiator_parse_message_2(struct EdhocInitiator *initiator_c,
                                  const EdhocMessageBuffer *message_2,
-                                 CredentialRPK expected_cred_r,
-                                 struct EdhocInitiatorProcessingM2C *initiator_c_out,
                                  uint8_t *c_r_out,
-                                 CredentialRPK *valid_cred_r_out,
+                                 IdCred *id_cred_r_out,
                                  struct EADItemC *ead_2_c_out);
 
-int8_t initiator_verify_message_2(struct EdhocInitiatorProcessingM2C *initiator_c,
+int8_t initiator_verify_message_2(struct EdhocInitiator *initiator_c,
                                   const BytesP256ElemLen *i,
-                                  CredentialRPK cred_i,
-                                  CredentialRPK valid_cred_r,
-                                  struct EdhocInitiatorProcessedM2C *initiator_c_out);
+                                  struct CredentialC *cred_i,
+                                  struct CredentialC *valid_cred_r);
 
-int8_t initiator_prepare_message_3(struct EdhocInitiatorProcessedM2C *initiator_c,
+int8_t initiator_prepare_message_3(struct EdhocInitiator *initiator_c,
                                    CredentialTransfer cred_transfer,
                                    struct EADItemC *ead_3_c,
-                                   struct EdhocInitiatorDoneC *initiator_c_out,
                                    EdhocMessageBuffer *message_3,
                                    uint8_t (*prk_out_c)[SHA256_DIGEST_LEN]);
 
-int8_t initiator_compute_ephemeral_secret(const struct EdhocInitiatorC *initiator_c,
+int8_t initiator_compute_ephemeral_secret(const struct EdhocInitiator *initiator_c,
                                           const BytesP256ElemLen *g_a,
                                           BytesP256ElemLen *secret_c_out);
+
+#ifdef __cplusplus
+} // extern "C"
+#endif // __cplusplus
 
 #endif /* LAKERS_C_H */

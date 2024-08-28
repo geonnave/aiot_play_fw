@@ -12,6 +12,14 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#define EAD_AUTHZ_LABEL 1
+
+#define EAD_AUTHZ_INFO_K_1_LABEL 0
+
+#define EAD_AUTHZ_INFO_IV_1_LABEL 1
+
+#define EAD_AUTHZ_ENC_STRUCTURE_LEN ((2 + 8) + 3)
+
 typedef struct ZeroTouchDevice {
   EdhocMessageBuffer id_u;
   BytesP256ElemLen g_w;

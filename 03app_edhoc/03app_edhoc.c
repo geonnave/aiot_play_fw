@@ -50,21 +50,18 @@ int main(void) {
 
 
     // EDHOC credentials
-    CredentialRPK cred_i = {0};
-    CredentialRPK cred_r = {0};
-    CredentialRPK fetched_cred_r = {0};
+    CredentialC cred_i = {0};
+    CredentialC cred_r = {0};
+    IdCred id_cred_r = {0};
+    CredentialC fetched_cred_r = {0};
     EADItemC dummy_ead = {0};
 
     int res = 0;
-    EdhocInitiatorC initiator;
+    EdhocInitiator initiator;
     EdhocMessageBuffer message_1;
     EdhocMessageBuffer *message_2;
     EdhocMessageBuffer message_3;
     uint8_t c_r;
-    EdhocInitiatorWaitM2C initiator_wait_m2 = {0};
-    EdhocInitiatorProcessingM2C initiator_processing_m2 = {0};
-    EdhocInitiatorProcessedM2C initiator_processed_m2 = {0};
-    EdhocInitiatorDoneC initiator_done = {0};
 
     uint8_t prk_out[SHA256_DIGEST_LEN];
 
@@ -85,21 +82,21 @@ int main(void) {
     // initialize memory buffer for PSA crypto backend
     mbedtls_memory_buffer_alloc_init(buffer, 4096 * 2);
 
-    credential_rpk_new(CRED_I, 107, &cred_i);
-    credential_rpk_new(CRED_R, 84, &cred_r);
+    credential_new(&cred_i, CRED_I, 107);
+    credential_new(&cred_r, CRED_R, 84);
 
-    initiator = initiator_new();
+    initiator_new(&initiator);
     printf("acting as edhoc initiator.");
 
     // Send message_1
-    res = initiator_prepare_message_1(&initiator, NULL, NULL, &initiator_wait_m2, &message_1);
+    res = initiator_prepare_message_1(&initiator, NULL, NULL, &message_1);
     if (res != 0) {
         return 1;
     }
    
     message_2 = _send_edhoc_message(&message_1, true, 10, 0xf5);
     if (message_2) {
-        res = initiator_parse_message_2(&initiator_wait_m2, message_2, cred_r, &initiator_processing_m2, &c_r, &fetched_cred_r, &dummy_ead);
+        res = initiator_parse_message_2(&initiator, message_2, &c_r, &id_cred_r, &dummy_ead);
     } else {
         // Error while sending
         return 1;
@@ -107,13 +104,20 @@ int main(void) {
 
     // Verify message_2
     if (!res) {
-        res = initiator_verify_message_2(&initiator_processing_m2, &I, cred_i, fetched_cred_r, &initiator_processed_m2);
+        res = credential_check_or_fetch(&cred_r, &id_cred_r, &fetched_cred_r);
+    } else {
+      return 1;
+    }
+
+    // verify cred
+    if (!res) {
+        res = initiator_verify_message_2(&initiator, &I, &cred_i, &fetched_cred_r);
     } else {
       return 1;
     }
 
     if(!res) {
-      res = initiator_prepare_message_3(&initiator_processed_m2, ByReference, NULL, &initiator_done, &message_3, prk_out);
+      res = initiator_prepare_message_3(&initiator, ByReference, NULL, &message_3, &prk_out);
     } else {
       return 1;
     }

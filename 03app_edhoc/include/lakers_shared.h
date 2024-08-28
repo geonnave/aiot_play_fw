@@ -12,7 +12,20 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#define MAX_MESSAGE_SIZE_LEN (128 + 64)
+#if !defined(QUADRUPLE_SIZES)
+/**
+ * Configured upscaling applied to fixed-size buffers
+ *
+ * Do not rely on this: It is only pub because cbindgen needs it.
+ */
+#define SCALE_FACTOR 1
+#endif
+
+#if defined(QUADRUPLE_SIZES)
+#define SCALE_FACTOR 4
+#endif
+
+#define MAX_MESSAGE_SIZE_LEN (SCALE_FACTOR * (128 + 64))
 
 #define ID_CRED_LEN 4
 
@@ -40,11 +53,11 @@
 
 #define ENCODED_VOUCHER_LEN (1 + MAC_LENGTH)
 
-#define MAX_KDF_CONTEXT_LEN 150
+#define MAX_KDF_CONTEXT_LEN (SCALE_FACTOR * 256)
 
 #define MAX_KDF_LABEL_LEN 15
 
-#define MAX_BUFFER_LEN 256
+#define MAX_BUFFER_LEN ((SCALE_FACTOR * 256) + 64)
 
 #define CBOR_BYTE_STRING 88
 
@@ -70,24 +83,29 @@
 
 #define CBOR_MAJOR_ARRAY_MAX 151
 
+#define CBOR_MAJOR_MAP 160
+
 #define MAX_INFO_LEN ((((((2 + SHA256_DIGEST_LEN) + 1) + MAX_KDF_LABEL_LEN) + 1) + MAX_KDF_CONTEXT_LEN) + 1)
+
+#define KCSS_LABEL 14
+
+#define KID_LABEL 4
 
 #define ENC_STRUCTURE_LEN ((8 + 5) + SHA256_DIGEST_LEN)
 
-#define MAX_EAD_SIZE_LEN 64
+#define MAX_EAD_SIZE_LEN (SCALE_FACTOR * 64)
 
-#define EAD_ZEROCONF_LABEL 1
-
-#define EAD_ZEROCONF_INFO_K_1_LABEL 0
-
-#define EAD_ZEROCONF_INFO_IV_1_LABEL 1
-
-#define EAD_ZEROCONF_ENC_STRUCTURE_LEN ((2 + 8) + 3)
+#define MAX_SUITES_LEN 9
 
 typedef enum CredentialTransfer {
   ByReference,
   ByValue,
 } CredentialTransfer;
+
+typedef enum CredentialType {
+  CCS,
+  CCS_PSK,
+} CredentialType;
 
 /**
  * An owned u8 vector of a limited length
@@ -104,19 +122,85 @@ typedef uint8_t BytesMac[MAC_LENGTH];
 
 typedef uint8_t BytesMac2[MAC_LENGTH_2];
 
+/**
+ * A fixed-size (but parameterized) buffer for EDHOC messages.
+ *
+ * Trying to have an API as similar as possible to `heapless::Vec`,
+ * so that in the future it can be hot-swappable by the application.
+ */
+typedef struct EdhocBuffer_16 {
+  uint8_t content[16];
+  uintptr_t len;
+} EdhocBuffer_16;
+
+typedef struct EdhocBuffer_16 BufferKid;
+
+/**
+ * A fixed-size (but parameterized) buffer for EDHOC messages.
+ *
+ * Trying to have an API as similar as possible to `heapless::Vec`,
+ * so that in the future it can be hot-swappable by the application.
+ */
+typedef struct EdhocBuffer_192 {
+  uint8_t content[192];
+  uintptr_t len;
+} EdhocBuffer_192;
+
+typedef struct EdhocBuffer_192 BufferCred;
+
+typedef struct EdhocBuffer_192 BufferIdCred;
+
+typedef uint8_t BytesKeyAES128[16];
+
+typedef uint8_t BytesKeyEC2[32];
+
+typedef enum CredentialKey_Tag {
+  Symmetric,
+  EC2Compact,
+} CredentialKey_Tag;
+
+typedef struct CredentialKey {
+  CredentialKey_Tag tag;
+  union {
+    struct {
+      BytesKeyAES128 symmetric;
+    };
+    struct {
+      BytesKeyEC2 ec2_compact;
+    };
+  };
+} CredentialKey;
+
+/**
+ * A value of ID_CRED_x: a credential identifier
+ *
+ * Possible values include key IDs, credentials by value and others.
+ */
+typedef struct IdCred {
+  /**
+   * The value is always stored in the ID_CRED_x form as a serialized one-element dictionary;
+   * while this technically wastes two bytes, it has the convenient property of having the full
+   * value available as a slice.
+   */
+  BufferIdCred bytes;
+} IdCred;
+
+/**
+ * A fixed-size (but parameterized) buffer for EDHOC messages.
+ *
+ * Trying to have an API as similar as possible to `heapless::Vec`,
+ * so that in the future it can be hot-swappable by the application.
+ */
+typedef struct EdhocBuffer_MAX_SUITES_LEN {
+  uint8_t content[MAX_SUITES_LEN];
+  uintptr_t len;
+} EdhocBuffer_MAX_SUITES_LEN;
+
 typedef uint8_t BytesP256ElemLen[P256_ELEM_LEN];
 
-typedef struct CredentialRPK {
-  struct EdhocMessageBuffer value;
-  BytesP256ElemLen public_key;
-  uint8_t kid;
-} CredentialRPK;
-
-typedef uint8_t BytesSuites[SUITES_LEN];
-
 typedef struct InitiatorStart {
-  BytesSuites suites_i;
-  uintptr_t suites_i_len;
+  struct EdhocBuffer_MAX_SUITES_LEN suites_i;
+  uint8_t method;
   BytesP256ElemLen x;
   BytesP256ElemLen g_x;
 } InitiatorStart;
