@@ -52,6 +52,7 @@ extern void mbedtls_memory_buffer_alloc_init(uint8_t *buf, size_t len);
 void _periodtimer_cb(void);
 void _ntw_receive_cb(uint8_t* buf, uint8_t bufLen);
 EdhocMessageBuffer* _send_edhoc_message(EdhocMessageBuffer *message, bool message_1, int timeout_s, uint8_t c_r);
+EdhocMessageBuffer* _send_eap_message(uint8_t payload[MAX_MESSAGE_SIZE_LEN], uint8_t payload_len);
 
 //=========================== main ============================================
 
@@ -67,16 +68,49 @@ int main(void) {
     int res = 0;
     EdhocInitiator initiator = {0};
     EdhocMessageBuffer message_1 = {0};
-    EdhocMessageBuffer *message_2;
+    EdhocMessageBuffer message_2 = {0};
     EdhocMessageBuffer message_3 = {0};
+    EADItemC dummy_ead = {0};
     uint8_t c_r;
 
     uint8_t prk_out[SHA256_DIGEST_LEN];
 
-    // used during execution of authz
-    EadAuthzDevice device = {0};
-    EADItemC ead_1 = {0}, ead_2 = {0};
-    BytesP256ElemLen authz_secret = {0};
+    // used for eap-edhoc
+    bool eap_res = true;
+    EdhocMessageBuffer *eap3_start;
+    EdhocMessageBuffer *eap5_message_2;
+    EdhocMessageBuffer *eap7_message_4;
+    EdhocMessageBuffer *eap9_success;
+
+
+    // EAP-Request/Identity: 5 bytes
+    uint8_t eap_packet_1[MAX_MESSAGE_SIZE_LEN] = { 0x01, 0x01, 0x00, 0x05, 0x01 };
+    uint8_t eap_packet_1_len = 5;
+    // EAP-Response/Identity: 16 bytes
+    uint8_t eap_packet_2[MAX_MESSAGE_SIZE_LEN] = { 0x02, 0x01, 0x00, 0x10, 0x01, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d };
+    uint8_t eap_packet_2_len = 16;
+    // EAP-Request/EAP-EDHOC Start: 6 bytes
+    uint8_t eap_packet_3[MAX_MESSAGE_SIZE_LEN] = { 0x01, 0x01, 0x00, 0x06, 0x7f, 0x10 };
+    uint8_t eap_packet_3_len = 6;
+    // EAP-Response/EAP-EDHOC message_1: 7 bytes (header only)
+    uint8_t eap_packet_4_header[MAX_MESSAGE_SIZE_LEN] = { 0x02, 0x01, 0x00, 0x2c, 0x7f, 0x01, 0x26 };
+    uint8_t eap_packet_4_header_len = 7;
+    // EAP-Request/EAP-EDHOC message_2: 7 bytes (header only)
+    uint8_t eap_packet_5_header[MAX_MESSAGE_SIZE_LEN] = { 0x01, 0x01, 0x00, 0x88, 0x7f, 0x01, 0x82 };
+    uint8_t eap_packet_5_header_len = 7;
+    // EAP-Response/EAP-EDHOC message_3: 7 bytes (header only)
+    uint8_t eap_packet_6_header[MAX_MESSAGE_SIZE_LEN] = { 0x02, 0x01, 0x00, 0x1a, 0x7f, 0x01, 0x14 };
+    uint8_t eap_packet_6_header_len = 7;
+    // EAP-Request/EAP-EDHOC message_4: 7 bytes (header only)
+    uint8_t eap_packet_7_header[MAX_MESSAGE_SIZE_LEN] = { 0x01, 0x01, 0x00, 0x16, 0x7f, 0x01, 0x10 };
+    uint8_t eap_packet_7_header_len = 7;
+    // EAP-Response/EAP-EDHOC: 6 bytes
+    uint8_t eap_packet_8[MAX_MESSAGE_SIZE_LEN] = { 0x02, 0x01, 0x00, 0x06, 0x7f, 0x00 };
+    uint8_t eap_packet_8_len = 6;
+    // EAP-Success: 4 bytes
+    uint8_t eap_packet_9[MAX_MESSAGE_SIZE_LEN] = { 0x03, 0x01, 0x00, 0x04 };
+    uint8_t eap_packet_9_len = 4;
+
 
     // memory buffer for mbedtls, required by crypto-psa-baremetal backend
     uint8_t buffer[4096 * 2] = {0};
@@ -103,31 +137,40 @@ int main(void) {
     mbedtls_memory_buffer_alloc_init(buffer, 4096 * 2);
 
     credential_new(&cred_i, CRED_I, 107);
+    //credential_new(&cred_r, CRED_R, 84);
 
     printf("acting as edhoc initiator.");
 
     gpio_P020_output_high();
 
+
+    //gpio_P015_output_high();
+    //while (1) {
+    //    if (app_vars.msg_rcvd) {
+    //        if (0 == memcmp(app_vars.message.content, eap_packet_1, eap_packet_1_len)) {
+    //            break;
+    //        }
+    //    }
+    //    busywait_approx_125ms();
+    //    counter++;
+    //    if (counter >= 10 * 8) { // magic number 8 to convert from 125 ms ticks to 1s ticks
+    //      return 1;
+    //    }
+    //}
+    //gpio_P015_output_low();
+
+
+    eap3_start = _send_eap_message(eap_packet_2, eap_packet_2_len);
+    if (!eap3_start) return 1;
+
     gpio_P002_output_high();
     initiator_new(&initiator);
     gpio_P002_output_low();
-    gpio_P003_output_high();
-    authz_device_new(&device, ID_U, ID_U_LEN, &G_W, LOC_W, LOC_W_LEN);
-    gpio_P003_output_low();
 
     // Send message_1
-    gpio_P002_output_high();
-    res = initiator_compute_ephemeral_secret(&initiator, &G_W, &authz_secret);
-    if (!res) {
-        res = authz_device_prepare_ead_1(&device, &authz_secret, SS, &ead_1);
-        gpio_P002_output_low();
-    } else {
-      return 1;
-    }
     if (!res) {
         gpio_P003_output_high();
-        res = initiator_prepare_message_1(&initiator, NULL, &ead_1, &message_1);
-        memcpy(device.wait_ead2.h_message_1, initiator.wait_m2.h_message_1, SHA256_DIGEST_LEN);
+        res = initiator_prepare_message_1(&initiator, NULL, NULL, &message_1);
         gpio_P003_output_low();
     } else {
       return 1;
@@ -135,55 +178,69 @@ int main(void) {
     if (res != 0) {
       return 1;
     }
-   
-    message_2 = _send_edhoc_message(&message_1, true, 10, 0xf5);
-    if (message_2) {
+    // NOTE prepend eap stuff
+    //message_2 = _send_edhoc_message(&message_1, true, 10, 0xf5);
+    eap_packet_4_header[eap_packet_4_header_len] = 0xf5;
+    memcpy(&eap_packet_4_header[eap_packet_4_header_len + 1], message_1.content, message_1.len);
+    eap5_message_2 = _send_eap_message(eap_packet_4_header, eap_packet_4_header_len + 1 + message_1.len);
+
+    // Parse message_2 + credential_check_or_fetch
+    if (eap5_message_2) {
         gpio_P002_output_high();
-        res = initiator_parse_message_2(&initiator, message_2, &c_r, &id_cred_r, &ead_2);
+        message_2.len = eap5_message_2->len-eap_packet_5_header_len;
+        memcpy(message_2.content, &eap5_message_2->content[eap_packet_5_header_len], message_2.len);
+        res = initiator_parse_message_2(&initiator, &message_2, &c_r, &id_cred_r, &dummy_ead);
     } else {
         // Error while sending
         return 1;
     }
 
-    // Verify message_2
+    // credential_check_or_fetch
     if (!res) {
         res = credential_check_or_fetch(NULL, &id_cred_r, &fetched_cred_r);
         gpio_P002_output_low();
-        //res = credential_check_or_fetch(&cred_r, &id_cred_r, &fetched_cred_r);
     } else {
       return 1;
     }
 
+    // verify message_2
     if (!res) {
         gpio_P003_output_high();
-        res = authz_device_process_ead_2(&device, &ead_2, &fetched_cred_r);
+        res = initiator_verify_message_2(&initiator, &I, &cred_i, &fetched_cred_r);
         gpio_P003_output_low();
     } else {
       return 1;
     }
 
-    // verify cred
-    if (!res) {
-        gpio_P002_output_high();
-        res = initiator_verify_message_2(&initiator, &I, &cred_i, &fetched_cred_r);
-        gpio_P002_output_low();
-    } else {
-      return 1;
-    }
-
+    // prepare message_3
     if(!res) {
-      gpio_P003_output_high();
+      gpio_P002_output_high();
       res = initiator_prepare_message_3(&initiator, ByReference, NULL, &message_3, &prk_out);
-      gpio_P003_output_low();
+      gpio_P002_output_low();
     } else {
       return 1;
     }
 
+    // NOTE prepend eap stuff
     if (!res) {
-      _send_edhoc_message(&message_3, false, 10, c_r);
+      //_send_edhoc_message(&message_3, false, 10, c_r);
+      eap_packet_6_header[eap_packet_6_header_len] = c_r;
+      memcpy(&eap_packet_6_header[eap_packet_6_header_len + 1], message_3.content, message_3.len);
+      eap7_message_4 = _send_eap_message(eap_packet_6_header, eap_packet_6_header_len + 1 + message_3.len);
     } else {
       return 1;
     }
+
+    if (eap7_message_4) {
+        eap9_success = _send_eap_message(eap_packet_8, eap_packet_8_len);
+    } else {
+        // Error while sending
+        return 1;
+    }
+
+    if (!eap9_success) return 1;
+    puts("done!");
+
 
     gpio_P020_output_low();
 
@@ -226,6 +283,36 @@ EdhocMessageBuffer* _send_edhoc_message(EdhocMessageBuffer *message, bool messag
    return timeout_occured || !message_1 ? NULL : &app_vars.message;
 }
 
+EdhocMessageBuffer* _send_eap_message(uint8_t payload[MAX_MESSAGE_SIZE_LEN], uint8_t payload_len) {
+  int timeout_s = 10;
+  int counter = 0;
+  bool ntw_success = false;
+  bool timeout_occured = false;
+
+  app_vars.msg_rcvd = false;
+  memset(&app_vars.message.content, 0x00, sizeof(app_vars.message.content));
+  app_vars.message.len = 0;
+
+  gpio_P011_output_high();
+  while (!ntw_success) {
+      ntw_success = ntw_transmit(payload, payload_len);
+  }
+  gpio_P011_output_low();
+
+  gpio_P015_output_high();
+  while (!app_vars.msg_rcvd) {
+      busywait_approx_125ms();
+      counter++;
+      if (counter >= timeout_s * 8) { // magic number 8 to convert from 125 ms ticks to 1s ticks
+        timeout_occured = true;
+        break;
+      }
+  }
+  gpio_P015_output_low();
+
+  return timeout_occured ? NULL : &app_vars.message;
+}
+
 void _ntw_receive_cb(uint8_t* buf, uint8_t bufLen) {
     static bool reassembly_in_progress = false;
     static uint8_t reassembled_len = 0;
@@ -234,8 +321,18 @@ void _ntw_receive_cb(uint8_t* buf, uint8_t bufLen) {
     uint8_t* payload = &buf[1]; // The actual message payload
     uint8_t payload_len = bufLen - 1; // Adjusted length for the payload
 
+    // No fragmentation
+    if (header == 0x00) {
+        if (payload_len <= MAX_MESSAGE_SIZE_LEN) {
+            memcpy(app_vars.message.content, payload, payload_len);
+            app_vars.message.len = payload_len;
+        } else {
+            reassembly_in_progress = false;
+            reassembled_len = 0;
+        }
+    }
     // Start of the message
-    if (header == 0x01) {
+    else if (header == 0x01) {
         reassembly_in_progress = true;
         reassembled_len = 0;
         if (payload_len <= MAX_MESSAGE_SIZE_LEN) {
@@ -276,8 +373,10 @@ void _ntw_receive_cb(uint8_t* buf, uint8_t bufLen) {
     }
 
     // If the message is fully reassembled
-    if (app_vars.message.len > 0) {
+    if (!reassembly_in_progress && app_vars.message.len > 0) {
         app_vars.msg_rcvd = true;
         app_dbg.numReceive++;
+    } else {
+        app_vars.msg_rcvd = false;
     }
 }
