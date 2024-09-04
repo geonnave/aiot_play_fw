@@ -6,6 +6,7 @@
 #include "lakers.h"
 #include "gpio.h"
 #include "busywait.h"
+#include "nrf52833_bitfields.h"
 
 //=========================== defines =========================================
 
@@ -32,6 +33,11 @@ typedef struct {
     bool               msg_rcvd;
     EdhocMessageBuffer message;
     uint8_t            txCounter;
+    uint16_t           *mote_id;
+    bool               joined;
+    bool               time_rcvd;
+    uint32_t           utcSecs_offset;
+    uint32_t           utcUsecs_offset;
 } app_vars_t;
 
 app_vars_t app_vars;
@@ -50,14 +56,83 @@ app_dbg_t app_dbg;
 extern void mbedtls_memory_buffer_alloc_init(uint8_t *buf, size_t len);
 
 void _periodtimer_cb(void);
+void _ntw_joining_cb(void);
+void _ntw_getMoteId_cb(dn_ipmt_getParameter_moteId_rpt* reply);
+void _ntw_time_cb(dn_ipmt_getParameter_time_rpt* reply);
 void _ntw_receive_cb(uint8_t* buf, uint8_t bufLen);
 EdhocMessageBuffer* _send_edhoc_message(EdhocMessageBuffer *message, bool message_1, int timeout_s, uint8_t c_r);
 EdhocMessageBuffer* _send_eap_message(uint8_t payload[MAX_MESSAGE_SIZE_LEN], uint8_t payload_len);
 
+//========================= evaluation ========================================
+uint32_t _timestamp(void) {
+    NRF_TIMER0->TASKS_CAPTURE[0] = 1;
+    return NRF_TIMER0->CC[0];
+}
+void encode_time(uint32_t total_microseconds, uint8_t* buffer) {
+    // Split into seconds and microseconds
+    uint32_t seconds = total_microseconds / 1000000;    // Get the seconds component
+    uint32_t microseconds = total_microseconds % 1000000; // Get the remaining microseconds
+
+    // account for the offset
+    microseconds += app_vars.utcUsecs_offset;
+    if (microseconds >= 1000000) {
+        // handle the carry
+        uint32_t carry_secs = microseconds / 1000000;
+        seconds += carry_secs;
+        microseconds = microseconds % 1000000;
+    }
+    seconds += app_vars.utcSecs_offset;
+
+    // prefix header indicating time
+    buffer[0] = buffer[1] = buffer[2] = buffer[3] = 0xbb;
+
+    // Encode seconds into the buffer (4 bytes for seconds)
+    buffer[4] = (seconds >> 24) & 0xFF; // MSB
+    buffer[5] = (seconds >> 16) & 0xFF;
+    buffer[6] = (seconds >> 8) & 0xFF;
+    buffer[7] = seconds & 0xFF;         // LSB
+
+    // Encode microseconds into the buffer (4 bytes for microseconds)
+    buffer[8] = (microseconds >> 24) & 0xFF; // MSB
+    buffer[9] = (microseconds >> 16) & 0xFF;
+    buffer[10] = (microseconds >> 8) & 0xFF;
+    buffer[11] = microseconds & 0xFF;         // LSB
+}
+
 //=========================== main ============================================
 
 int main(void) {
+    // memory buffer for mbedtls, required by crypto-psa-baremetal backend
+    uint8_t buffer[4096 * 2] = {0};
 
+    // bsp
+    board_init();
+
+    // gpios (not needed when measuring overall duration using RTC and network time)
+    gpio_P002_output_init(); // gpio 1 for cpu
+    gpio_P003_output_init(); // gpio 2 for cpu
+    gpio_P011_output_init(); // gpio 1 for radio
+    gpio_P015_output_init(); // gpio 2 for radio
+    gpio_P020_output_init(); // gpio for syncing saleae / otii
+    gpio_P030_output_init(); // gpio for outer syncing (maybe unneeded?)
+
+    // Configure timer used for timestamping events (should not be used when measuring power consumption)
+    NRF_TIMER0->TASKS_CLEAR = 1;
+    NRF_TIMER0->PRESCALER   = 4; // adjusts the timer frequency, 2^4 = 16
+    NRF_TIMER0->BITMODE     = (TIMER_BITMODE_BITMODE_32Bit << TIMER_BITMODE_BITMODE_Pos); // 32-bit timer
+    NRF_TIMER0->INTENSET    = (1 << TIMER_INTENSET_COMPARE0_Pos); // Enable interrupt on compare event
+    NVIC_EnableIRQ(TIMER0_IRQn);
+    NRF_TIMER0->TASKS_START = 1; // Start the timer
+
+    // initialize the network uC
+    ntw_init(_ntw_joining_cb, _ntw_getMoteId_cb, _ntw_time_cb, _ntw_receive_cb);
+
+    // initialize memory buffer for PSA crypto backend
+    mbedtls_memory_buffer_alloc_init(buffer, 4096 * 2);
+
+    // initialize variables
+    memset(&app_vars,0x00,sizeof(app_vars));
+    memset(&app_dbg, 0x00,sizeof(app_dbg));
 
     // EDHOC credentials
     CredentialC cred_i = {0};
@@ -77,11 +152,19 @@ int main(void) {
 
     // used for eap-edhoc
     bool eap_res = true;
+    EdhocMessageBuffer *signal_joined_response = NULL;
     EdhocMessageBuffer *eap3_start;
     EdhocMessageBuffer *eap5_message_2;
     EdhocMessageBuffer *eap7_message_4;
     EdhocMessageBuffer *eap9_success;
 
+
+    // only to signal alive again
+    uint8_t signal_joined_dummy[MAX_MESSAGE_SIZE_LEN] = { 0xaa, 0xaa, 0xaa, 0xaa };
+    uint8_t signal_joined_dummy_len = 4;
+    // only to sync time
+    uint8_t time_sync_eap_t1[MAX_MESSAGE_SIZE_LEN] = { 0 };
+    uint8_t time_sync_eap_t1_len = 12;
 
     // EAP-Request/Identity: 5 bytes
     uint8_t eap_packet_1[MAX_MESSAGE_SIZE_LEN] = { 0x01, 0x01, 0x00, 0x05, 0x01 };
@@ -112,53 +195,58 @@ int main(void) {
     uint8_t eap_packet_9_len = 4;
 
 
-    // memory buffer for mbedtls, required by crypto-psa-baremetal backend
-    uint8_t buffer[4096 * 2] = {0};
-
-    // initialize variables
-    memset(&app_vars,0x00,sizeof(app_vars));
-    memset(&app_dbg, 0x00,sizeof(app_dbg));
-
-    // bsp
-    board_init();
-
-    // gpios
-    gpio_P002_output_init(); // gpio 1 for cpu
-    gpio_P003_output_init(); // gpio 2 for cpu
-    gpio_P011_output_init(); // gpio 1 for radio
-    gpio_P015_output_init(); // gpio 2 for radio
-    gpio_P020_output_init(); // gpio for syncing saleae / otii
-    gpio_P030_output_init(); // gpio for outer syncing (maybe unneeded?)
-
-    // initialize the network uC
-    ntw_init(NULL, NULL, NULL, _ntw_receive_cb);
-
-    // initialize memory buffer for PSA crypto backend
-    mbedtls_memory_buffer_alloc_init(buffer, 4096 * 2);
-
     credential_new(&cred_i, CRED_I, 107);
     //credential_new(&cred_r, CRED_R, 84);
 
-    printf("acting as edhoc initiator.");
+    puts("\nacting as edhoc initiator.");
+
+
+    printf("waiting for oper...");
+    while (!ntw_getMoteId()) {
+        for (int i = 0; i < 8; i++) { // wait for 1s
+            busywait_approx_125ms();
+        }
+        printf(".");
+    };
+    puts(" joined!!");
+
+    printf("waiting for time...");
+    while (!app_vars.time_rcvd) {
+        ntw_getTime();
+        for (int i = 0; i < 8; i++) { // wait for 1s
+            busywait_approx_125ms();
+        }
+        printf(".");
+    };
+    puts(" timed!!");
+
+
+    // only to signal that the mote has joined
+    printf("Signaling mote has joined");
+    while (!signal_joined_response) {
+        printf(".");
+        signal_joined_response = _send_eap_message(signal_joined_dummy, signal_joined_dummy_len);
+    }
+    puts(" ok");
+
 
     gpio_P020_output_high();
 
+    int counter = 0;
+    while (1) {
+        if (app_vars.msg_rcvd) {
+            if (0 == memcmp(app_vars.message.content, eap_packet_1, eap_packet_1_len)) {
+                break;
+            }
+        }
+        busywait_approx_125ms();
+        counter++;
+        if (counter >= 30 * 8) { // magic number 8 to convert from 125 ms ticks to 1s ticks
+          return 1;
+        }
+    }
 
-    //gpio_P015_output_high();
-    //while (1) {
-    //    if (app_vars.msg_rcvd) {
-    //        if (0 == memcmp(app_vars.message.content, eap_packet_1, eap_packet_1_len)) {
-    //            break;
-    //        }
-    //    }
-    //    busywait_approx_125ms();
-    //    counter++;
-    //    if (counter >= 10 * 8) { // magic number 8 to convert from 125 ms ticks to 1s ticks
-    //      return 1;
-    //    }
-    //}
-    //gpio_P015_output_low();
-
+    uint32_t t0 = _timestamp();
 
     eap3_start = _send_eap_message(eap_packet_2, eap_packet_2_len);
     if (!eap3_start) return 1;
@@ -239,10 +327,27 @@ int main(void) {
     }
 
     if (!eap9_success) return 1;
-    puts("done!");
+    uint32_t t1 = _timestamp();
 
+    printf("Time diff: %zu\n", t1-t0); // give more or less an idea of the overall duration
+
+    // only to sync time
+    encode_time(t1, time_sync_eap_t1);
+    _send_eap_message(time_sync_eap_t1, time_sync_eap_t1_len);
 
     gpio_P020_output_low();
+
+    printf("done! will re-do! ");
+
+    // wait for 20 seconds to give chance for manager to reset, then reset the mote
+    for (int i = 0; i < 20 * 8; i++) {
+        printf(".");
+        busywait_approx_125ms();
+    }
+    printf("\n");
+    busywait_approx_125ms();
+
+    NVIC_SystemReset();
 
     // main loop
     while(1) {
@@ -252,6 +357,48 @@ int main(void) {
 }
 
 //=========================== private =========================================
+
+void _ntw_joining_cb(void) {
+    //puts("joined!");
+}
+
+void _ntw_getMoteId_cb(dn_ipmt_getParameter_moteId_rpt* reply) {
+    //puts("got mote id");
+}
+
+void _ntw_time_cb(dn_ipmt_getParameter_time_rpt* reply) {
+    printf(" received time ");
+    if (reply->utcUsecs) {
+        uint32_t ts = _timestamp(); // Get the current timestamp in microseconds
+        // Split ts into seconds and microseconds components
+        uint32_t ts_secs = ts / 1000000;
+        uint32_t ts_usecs = ts % 1000000;
+
+        // Detect if carry would be needed and return early
+        if (reply->utcUsecs < ts_usecs) {
+            printf(" ignore-carry ");
+            return;  // Early return if carry is needed
+        }
+        app_vars.time_rcvd = true;
+
+        // Calculate the difference in microseconds (no carry needed)
+        app_vars.utcUsecs_offset = reply->utcUsecs - ts_usecs;
+
+        // Calculate the seconds difference
+        uint32_t secs = 0;
+        for (int i = 4; i < 8; i++) {
+            secs = (secs << 8) | reply->utcSecs[i];
+        }
+        app_vars.utcSecs_offset = secs - ts_secs;
+
+        // Print debug information
+        puts("");
+        printf("ts:     secs: %u, usecs: %u\n", ts_secs, ts_usecs);
+        printf("reply:  secs: %u, usecs: %u\n", secs, reply->utcUsecs);
+        printf("offset: secs: %u, usecs: %u\n", app_vars.utcSecs_offset, app_vars.utcUsecs_offset);
+    }
+}
+
 
 EdhocMessageBuffer* _send_edhoc_message(EdhocMessageBuffer *message, bool message_1, int timeout_s, uint8_t c_r) {
    int counter = 0;
